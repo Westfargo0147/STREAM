@@ -23,6 +23,7 @@ class SOMTM(BaseModel, SentenceEncodingMixin):
         reduce_dim: bool = True,
         reduced_dimension: int = 16,
         dim: int = None,
+        average_encodings: bool = True,
         **kwargs,
     ):
         """
@@ -66,6 +67,7 @@ class SOMTM(BaseModel, SentenceEncodingMixin):
         self.trained = False
         self.m = self.hparams.get("m", m)
         self.n = self.hparams.get("n", n)
+        self.use_average = self.hparams.get("average_encodings", average_encodings)
 
         self.embedding_model_name = self.hparams.get(
             "embedding_model_name", embedding_model_name
@@ -93,7 +95,7 @@ class SOMTM(BaseModel, SentenceEncodingMixin):
             umap_args
             or {
                 "n_neighbors": 15,
-                "n_components": 15,
+                "n_components": reduced_dimension,
                 "metric": "cosine",
             },
         )
@@ -142,7 +144,9 @@ class SOMTM(BaseModel, SentenceEncodingMixin):
 
         else:
             self.embeddings = self.encode_documents(
-                dataset.texts, encoder_model=self.embedding_model_name, use_average=True
+                dataset.texts,
+                encoder_model=self.embedding_model_name,
+                use_average=self.use_average,
             )
 
             if self.save_embeddings:
@@ -230,7 +234,7 @@ class SOMTM(BaseModel, SentenceEncodingMixin):
 
             if self.use_softmax:
                 influence = torch.nn.functional.softmax(
-                    -distance_squares / (2 * rad_squared)
+                    -distance_squares / (2 * rad_squared), dim=0
                 )
             else:
                 influence = torch.exp(-distance_squares / (2 * rad_squared))
@@ -445,3 +449,41 @@ class SOMTM(BaseModel, SentenceEncodingMixin):
         if not self.trained:
             raise ValueError("Model has not been trained yet.")
         return self.topic_document_matrix
+
+    def predict(self, new_data):
+        """
+        Predict the cluster labels for new input data.
+
+        Parameters
+        ----------
+        new_data : list of str
+            List of new input texts to be clustered.
+
+        Returns
+        -------
+        list of int
+            List of predicted cluster labels for the input texts.
+        """
+        assert self.trained, "Model must be trained before making predictions."
+
+        # Step 1: Encode the new input data
+        encoded_data = self.encode_documents(
+            new_data,
+            encoder_model=self.embedding_model_name,
+            use_average=self.use_average,
+        )
+
+        # Step 2: Apply dimensionality reduction if applicable
+        if self.reduce_dim:
+            reduced_data = self.reducer.transform(encoded_data)
+        else:
+            reduced_data = encoded_data
+
+        # Step 3: Find the BMU for each encoded input
+        predicted_labels = []
+        for x in reduced_data:
+            x_tensor = torch.tensor(x)
+            bmu_index = self._find_bmu(x_tensor)
+            predicted_labels.append(bmu_index.item())  # Convert tensor to integer
+
+        return predicted_labels
